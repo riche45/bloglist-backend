@@ -4,14 +4,41 @@ const mongoose = require('mongoose')
 const supertest = require('supertest')
 const app = require('../index')
 const api = supertest(app)
+const jwt = require('jsonwebtoken')
 
 const helper = require('./test_helper')
 const Blog = require('../models/blog')
+const User = require('../models/user')
 
 describe('when there is initially some blogs saved', () => {
+  let token
+
   beforeEach(async () => {
     await Blog.deleteMany({})
-    await Blog.insertMany(helper.initialBlogs)
+    await User.deleteMany({})
+
+    // Crear un usuario para las pruebas
+    const user = new User({
+      username: 'testuser',
+      name: 'Test User',
+      passwordHash: 'hashedpassword'
+    })
+    const savedUser = await user.save()
+
+    // Crear token para el usuario
+    const userForToken = {
+      username: savedUser.username,
+      id: savedUser._id,
+    }
+    token = jwt.sign(userForToken, process.env.SECRET)
+
+    // Crear blogs con referencia al usuario
+    const blogObjects = helper.initialBlogs.map(blog => new Blog({
+      ...blog,
+      user: savedUser._id
+    }))
+    
+    await Blog.insertMany(blogObjects)
   })
 
   test('blogs are returned as json', async () => {
@@ -44,6 +71,7 @@ describe('when there is initially some blogs saved', () => {
 
       await api
         .post('/api/blogs')
+        .set('Authorization', `Bearer ${token}`)
         .send(newBlog)
         .expect(201)
         .expect('Content-Type', /application\/json/)
@@ -64,11 +92,29 @@ describe('when there is initially some blogs saved', () => {
 
       const response = await api
         .post('/api/blogs')
+        .set('Authorization', `Bearer ${token}`)
         .send(newBlog)
         .expect(201)
         .expect('Content-Type', /application\/json/)
 
       assert.strictEqual(response.body.likes, 0)
+    })
+
+    test('fails with status code 401 if token is not provided', async () => {
+      const newBlog = {
+        title: 'Blog without token',
+        author: 'Test Author',
+        url: 'http://test.com',
+        likes: 5
+      }
+
+      await api
+        .post('/api/blogs')
+        .send(newBlog)
+        .expect(401)
+
+      const blogsAtEnd = await helper.blogsInDb()
+      assert.strictEqual(blogsAtEnd.length, helper.initialBlogs.length)
     })
 
     test('fails with status code 400 if title is missing', async () => {
@@ -80,6 +126,7 @@ describe('when there is initially some blogs saved', () => {
 
       await api
         .post('/api/blogs')
+        .set('Authorization', `Bearer ${token}`)
         .send(newBlog)
         .expect(400)
 
@@ -96,6 +143,7 @@ describe('when there is initially some blogs saved', () => {
 
       await api
         .post('/api/blogs')
+        .set('Authorization', `Bearer ${token}`)
         .send(newBlog)
         .expect(400)
 
@@ -105,12 +153,13 @@ describe('when there is initially some blogs saved', () => {
   })
 
   describe('deletion of a blog', () => {
-    test('succeeds with status code 204 if id is valid', async () => {
+    test('succeeds with status code 204 if id is valid and user is creator', async () => {
       const blogsAtStart = await helper.blogsInDb()
       const blogToDelete = blogsAtStart[0]
 
       await api
         .delete(`/api/blogs/${blogToDelete.id}`)
+        .set('Authorization', `Bearer ${token}`)
         .expect(204)
 
       const blogsAtEnd = await helper.blogsInDb()
@@ -121,11 +170,52 @@ describe('when there is initially some blogs saved', () => {
       assert(!titles.includes(blogToDelete.title))
     })
 
+    test('fails with status code 401 if token is not provided', async () => {
+      const blogsAtStart = await helper.blogsInDb()
+      const blogToDelete = blogsAtStart[0]
+
+      await api
+        .delete(`/api/blogs/${blogToDelete.id}`)
+        .expect(401)
+
+      const blogsAtEnd = await helper.blogsInDb()
+      assert.strictEqual(blogsAtEnd.length, helper.initialBlogs.length)
+    })
+
+    test('fails with status code 403 if user is not the creator', async () => {
+      // Crear otro usuario
+      const anotherUser = new User({
+        username: 'anotheruser',
+        name: 'Another User',
+        passwordHash: 'hashedpassword'
+      })
+      const savedAnotherUser = await anotherUser.save()
+
+      // Crear token para el otro usuario
+      const anotherUserForToken = {
+        username: savedAnotherUser.username,
+        id: savedAnotherUser._id,
+      }
+      const anotherToken = jwt.sign(anotherUserForToken, process.env.SECRET)
+
+      const blogsAtStart = await helper.blogsInDb()
+      const blogToDelete = blogsAtStart[0]
+
+      await api
+        .delete(`/api/blogs/${blogToDelete.id}`)
+        .set('Authorization', `Bearer ${anotherToken}`)
+        .expect(403)
+
+      const blogsAtEnd = await helper.blogsInDb()
+      assert.strictEqual(blogsAtEnd.length, helper.initialBlogs.length)
+    })
+
     test('fails with statuscode 400 if id is invalid', async () => {
       const invalidId = '5a3d5da59070081a82a3445'
 
       await api
         .delete(`/api/blogs/${invalidId}`)
+        .set('Authorization', `Bearer ${token}`)
         .expect(400)
     })
   })
